@@ -616,6 +616,8 @@ pub fn run() {
             sessions::undo_progress,
             sessions::session_action,
             sessions::import_session,
+            sessions::export_sessions,
+            sessions::import_sessions_file,
             save_settings,
             pick_repository,
             detach_repository,

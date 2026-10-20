@@ -7,13 +7,14 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     },
 };
+use tauri_plugin_dialog::DialogExt;
 use tokio_util::sync::CancellationToken;
 
 const VERSION: u32 = 1;
@@ -1082,3 +1083,357 @@ pub fn undo_progress(
     Ok(result)
 }
 
+// Portable session archives contain only the saved session schema, never settings or credentials.
+const ARCHIVE_LIMIT: u64 = 32 * 1024 * 1024;
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionArchive {
+    format: String,
+    version: u32,
+    sessions: Vec<Document>,
+}
+fn archive_bytes(store: &Store, id: Option<&str>) -> Result<Vec<u8>, String> {
+    let mut sessions = if let Some(id) = id {
+        vec![store.docs.get(id).cloned().ok_or("Session missing.")?]
+    } else {
+        store.docs.values().cloned().collect()
+    };
+    for doc in &mut sessions {
+        doc.sanitize()?;
+    }
+    let bytes = serde_json::to_vec(&SessionArchive {
+        format: "coco.sessions".into(),
+        version: 1,
+        sessions,
+    })
+    .map_err(|_| "Could not encode sessions.")?;
+    if bytes.len() as u64 > ARCHIVE_LIMIT {
+        return Err("Export exceeds 32 MiB. Export individual sessions instead.".into());
+    }
+    Ok(bytes)
+}
+fn decode_archive(bytes: &[u8]) -> Result<Vec<Document>, String> {
+    if bytes.len() as u64 > ARCHIVE_LIMIT {
+        return Err("Session archive exceeds 32 MiB.".into());
+    }
+    let mut archive: SessionArchive =
+        serde_json::from_slice(bytes).map_err(|_| "Invalid CoCo session archive.")?;
+    if archive.format != "coco.sessions"
+        || archive.version != 1
+        || archive.sessions.is_empty()
+        || archive.sessions.len() > MAX_SESSIONS
+    {
+        return Err("Unsupported or empty CoCo session archive.".into());
+    }
+    for doc in &mut archive.sessions {
+        doc.sanitize()?;
+        if serde_json::to_vec(doc)
+            .map_err(|_| "Invalid session.")?
+            .len() as u64
+            > MAX_BYTES
+        {
+            return Err("An imported session exceeds 8 MiB.".into());
+        }
+        doc.id = new_id(); // Always import copies; existing sessions are never replaced.
+        doc.form_revision = 0;
+        doc.progress_epoch = 0;
+        let safe_counter = 9_007_199_254_730_000u64;
+        if [
+            doc.last_checkpoint,
+            doc.last_progress_checkpoint,
+            doc.usage.requests,
+            doc.usage.input_tokens,
+            doc.usage.output_tokens,
+        ]
+        .iter()
+        .any(|n| *n > safe_counter)
+        {
+            return Err("Imported session has invalid counters.".into());
+        }
+        if doc.title.trim().is_empty() {
+            doc.title = "Imported session".into();
+        }
+        doc.source_id.clear();
+        doc.include_repo = false;
+        for (index, reference) in doc.references.iter_mut().enumerate() {
+            reference.id = index as u64 + 1;
+            reference.enabled = false;
+        }
+        for message in &mut doc.messages {
+            message.id = new_id();
+        }
+    }
+    Ok(archive.sessions)
+}
+fn import_archive(store: &mut Store, bytes: &[u8]) -> Result<usize, String> {
+    let mut docs = decode_archive(bytes)?;
+    if store.docs.len() + docs.len() > MAX_SESSIONS {
+        return Err("Import would exceed the 100-session limit. No sessions were imported.".into());
+    }
+    for doc in &mut docs {
+        while store.docs.contains_key(&doc.id)
+            || store.dir.join(format!("{}.json", doc.id)).exists()
+        {
+            doc.id = new_id();
+        }
+    }
+    let previous = store.index.clone();
+    let ids: Vec<_> = docs.iter().map(|d| d.id.clone()).collect();
+    let result = (|| {
+        for doc in docs {
+            store.save_doc(doc)?;
+        }
+        if store.index.open_ids.len() < MAX_TABS {
+            store.index.open_ids.push(ids[0].clone());
+            store.index.active_id = ids[0].clone();
+        }
+        store.save_index()
+    })();
+    if let Err(error) = result {
+        store.index = previous;
+        for id in &ids {
+            store.docs.remove(id);
+            for extension in ["json", "tmp"] {
+                let _ = fs::remove_file(store.dir.join(format!("{id}.{extension}")));
+            }
+        }
+        return Err(format!("Import could not be saved: {error}"));
+    }
+    Ok(ids.len())
+}
+fn read_archive(path: &Path) -> Result<Vec<u8>, String> {
+    let file = File::open(path).map_err(|_| "Could not open the selected archive.")?;
+    let mut bytes = Vec::new();
+    file.take(ARCHIVE_LIMIT + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "Could not read the archive.")?;
+    if bytes.len() as u64 > ARCHIVE_LIMIT {
+        return Err("Session archive exceeds 32 MiB.".into());
+    }
+    Ok(bytes)
+}
+fn write_archive(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let temporary = path.with_file_name(format!(".coco-export-{}.tmp", new_id()));
+    let result: Result<(), String> = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .map_err(|_| "Could not create the export file.")?;
+        file.write_all(bytes)
+            .and_then(|_| file.sync_all())
+            .map_err(|_| "Could not finish writing the export.")?;
+        drop(file);
+        fs::rename(&temporary, path).map_err(|_| "Could not replace the export file.".to_string())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+#[tauri::command]
+pub async fn export_sessions(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, State>,
+    id: Option<String>,
+) -> Result<bool, String> {
+    let (bytes, store_dir) = {
+        let store = state.sessions.store.lock().unwrap();
+        (archive_bytes(&store, id.as_deref())?, store.dir.clone())
+    };
+    let chosen = tauri::async_runtime::spawn_blocking(move || {
+        app.dialog()
+            .file()
+            .set_title("Export CoCo sessions")
+            .add_filter("CoCo session archive", &["json"])
+            .set_file_name("CoCo-sessions.json")
+            .blocking_save_file()
+    })
+    .await
+    .map_err(|_| "Could not open the save dialog.")?;
+    let Some(chosen) = chosen else {
+        return Ok(false);
+    };
+    let path = chosen.into_path().map_err(|_| "Choose a local file.")?;
+    let parent = path
+        .parent()
+        .and_then(|p| p.canonicalize().ok())
+        .ok_or("Choose an existing destination folder.")?;
+    if parent.starts_with(
+        store_dir
+            .canonicalize()
+            .map_err(|_| "Session store unavailable.")?,
+    ) {
+        return Err("Choose an export location outside CoCo's session store.".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || write_archive(&path, &bytes))
+        .await
+        .map_err(|_| "Export could not finish.")??;
+    Ok(true)
+}
+#[derive(Serialize)]
+pub struct ImportResult {
+    workspace: Workspace,
+    count: usize,
+}
+#[tauri::command]
+pub async fn import_sessions_file(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, State>,
+) -> Result<Option<ImportResult>, String> {
+    let chosen = tauri::async_runtime::spawn_blocking(move || {
+        app.dialog()
+            .file()
+            .set_title("Import CoCo sessions")
+            .add_filter("CoCo session archive", &["json"])
+            .blocking_pick_file()
+    })
+    .await
+    .map_err(|_| "Could not open the file dialog.")?;
+    let Some(chosen) = chosen else {
+        return Ok(None);
+    };
+    let path = chosen.into_path().map_err(|_| "Choose a local archive.")?;
+    let bytes = tauri::async_runtime::spawn_blocking(move || read_archive(&path))
+        .await
+        .map_err(|_| "Could not read the archive.")??;
+    let mut store = state.sessions.store.lock().unwrap();
+    let count = import_archive(&mut store, &bytes)?;
+    Ok(Some(ImportResult {
+        workspace: store.workspace(),
+        count,
+    }))
+}
+
+#[cfg(test)]
+mod archive_tests {
+    use super::*;
+    #[test]
+    fn archives_round_trip_into_copies_without_active_external_inputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = Manager::default();
+        manager.initialize(dir.path().into()).unwrap();
+        let id = manager.workspace().active_id;
+        let mut store = manager.store.lock().unwrap();
+        let doc = store.docs.get_mut(&id).unwrap();
+        doc.goal = "Fix save".into();
+        doc.draft = "Question".into();
+        doc.root = Some("C:\\repo".into());
+        doc.source_id = "old-monitor".into();
+        doc.messages.push(ChatMessage {
+            id: new_id(),
+            role: "assistant".into(),
+            text: "Run the focused test".into(),
+            checkpoint: 1,
+            time: 1,
+        });
+        doc.references.push(ReferenceSpec {
+            id: 1,
+            kind: "text".into(),
+            source: "Reference notes".into(),
+            label: "Notes".into(),
+            enabled: true,
+        });
+        doc.milestones.push(Milestone {
+            id: new_id(),
+            title: "Verify save".into(),
+            status: crate::progress::Status::Complete,
+            done: true,
+            manual: true,
+            ..Default::default()
+        });
+        let bytes = archive_bytes(&store, Some(&id)).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(json.get("settings").is_none());
+        assert!(json["sessions"][0].get("screen").is_none());
+        assert_eq!(import_archive(&mut store, &bytes).unwrap(), 1);
+        assert_eq!(store.docs.len(), 2);
+        let imported = store.docs.get(&store.index.active_id).unwrap();
+        assert_ne!(imported.id, id);
+        assert_eq!(imported.messages[0].text, "Run the focused test");
+        assert_eq!(imported.draft, "Question");
+        assert!(imported.milestones[0].manual);
+        assert!(!imported.include_repo);
+        assert!(!imported.references[0].enabled);
+        assert!(imported.source_id.is_empty());
+        assert_eq!(imported.references[0].source, "Reference notes");
+        let new_id = imported.id.clone();
+        drop(store);
+        drop(manager);
+        let restored = Manager::default();
+        restored.initialize(dir.path().into()).unwrap();
+        assert_eq!(restored.view(&new_id).unwrap().document.goal, "Fix save");
+    }
+    #[test]
+    fn archive_validation_is_all_or_nothing_and_newer_versions_are_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = Manager::default();
+        manager.initialize(dir.path().into()).unwrap();
+        let mut store = manager.store.lock().unwrap();
+        let mut doc = Document::new(None);
+        doc.goal = "Valid".into();
+        let mut invalid = doc.clone();
+        invalid.messages.push(ChatMessage {
+            id: new_id(),
+            role: "system".into(),
+            text: "Instructions".into(),
+            checkpoint: 0,
+            time: 0,
+        });
+        let bytes = serde_json::to_vec(&SessionArchive {
+            format: "coco.sessions".into(),
+            version: 1,
+            sessions: vec![doc.clone(), invalid],
+        })
+        .unwrap();
+        assert!(import_archive(&mut store, &bytes).is_err());
+        assert_eq!(store.docs.len(), 1);
+        let bytes = serde_json::to_vec(&SessionArchive {
+            format: "coco.sessions".into(),
+            version: 2,
+            sessions: vec![doc],
+        })
+        .unwrap();
+        assert!(decode_archive(&bytes).is_err());
+        assert!(decode_archive(b"not json").is_err());
+        let mut unsafe_doc = Document::new(None);
+        unsafe_doc.last_checkpoint = u64::MAX;
+        let bytes = serde_json::to_vec(&SessionArchive {
+            format: "coco.sessions".into(),
+            version: 1,
+            sessions: vec![unsafe_doc],
+        })
+        .unwrap();
+        assert!(decode_archive(&bytes).is_err());
+    }
+    #[test]
+    fn import_rolls_back_new_documents_when_index_cannot_be_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = Manager::default();
+        manager.initialize(dir.path().into()).unwrap();
+        let mut store = manager.store.lock().unwrap();
+        let bytes = archive_bytes(&store, None).unwrap();
+        let previous = store.index.active_id.clone();
+        fs::create_dir(store.dir.join("index.tmp")).unwrap();
+        assert!(import_archive(&mut store, &bytes).is_err());
+        assert_eq!(store.docs.len(), 1);
+        assert_eq!(store.index.active_id, previous);
+        let json_count = fs::read_dir(&store.dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+            .count();
+        assert_eq!(json_count, 2);
+    }
+    #[test]
+    fn archive_read_write_and_overwrite_are_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("export.json");
+        write_archive(&file, b"first").unwrap();
+        write_archive(&file, b"second").unwrap();
+        assert_eq!(read_archive(&file).unwrap(), b"second");
+        let huge = File::create(&file).unwrap();
+        huge.set_len(ARCHIVE_LIMIT + 1).unwrap();
+        assert!(read_archive(&file).is_err());
+    }
+}

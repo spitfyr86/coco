@@ -5,6 +5,8 @@ import {
   LoaderCircle,
   Pencil,
   Trash2,
+  Download,
+  Upload,
 } from "lucide-react";
 import App, { Modal } from "./App";
 import { call, native } from "./bridge";
@@ -60,6 +62,7 @@ export default function Workspace() {
   const [saveError, setSaveError] = useState("");
   const [saving, setSaving] = useState(0);
   const [acting, setActing] = useState(false);
+  const [transferNotice, setTransferNotice] = useState("");
   const [history, setHistory] = useState(false);
   const [rename, setRename] = useState<SessionSummary | null>(null);
   const [title, setTitle] = useState("");
@@ -243,6 +246,42 @@ export default function Workspace() {
       setActing(false);
     }
   }
+  async function transfer(kind: "export" | "import", id?: string) {
+    if (actionBusy.current) return;
+    actionBusy.current = true;
+    setActing(true);
+    setError("");
+    setTransferNotice("");
+    try {
+      const writes = await Promise.allSettled(Object.values(pending.current));
+      const failed = writes.find(
+        (r): r is PromiseRejectedResult => r.status === "rejected",
+      );
+      if (failed) throw failed.reason;
+      if (kind === "export") {
+        if (await call<boolean>("export_sessions", { id: id ?? null }))
+          setTransferNotice(
+            id ? "Session exported." : "All sessions exported.",
+          );
+      } else {
+        const result = await call<{
+          workspace: WorkspaceState;
+          count: number;
+        } | null>("import_sessions_file");
+        if (result) {
+          await apply(result.workspace);
+          setTransferNotice(
+            `Imported ${result.count} session${result.count === 1 ? "" : "s"} as copies. Review repository and reference locations before enabling them.`,
+          );
+        }
+      }
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      actionBusy.current = false;
+      setActing(false);
+    }
+  }
   function isBusy(id: string) {
     return (
       status[id] && (status[id].phase !== "idle" || status[id].voice !== "idle")
@@ -396,6 +435,11 @@ export default function Workspace() {
           <History size={17} />
         </button>
       </div>
+      {transferNotice && (
+        <div className="workspace-notice" role="status">
+          {transferNotice}
+        </div>
+      )}
       {(error || saveError || workspace.warning) && (
         <div className="workspace-notice" role="alert">
           {error || saveError || workspace.warning}
@@ -440,6 +484,55 @@ export default function Workspace() {
               Closing a tab keeps its saved session here. Delete permanently
               removes it.
             </p>
+            <div className="transfer-actions">
+              <button
+                className="button secondary"
+                disabled={
+                  acting ||
+                  captured ||
+                  saving > 0 ||
+                  Object.values(status).some(
+                    (s) => s.phase !== "idle" || s.voice !== "idle",
+                  ) ||
+                  !native
+                }
+                onClick={() => void transfer("import")}
+              >
+                <Upload size={16} />
+                Import
+              </button>
+              <button
+                className="button secondary"
+                disabled={
+                  acting ||
+                  captured ||
+                  saving > 0 ||
+                  Object.values(status).some(
+                    (s) => s.phase !== "idle" || s.voice !== "idle",
+                  ) ||
+                  !native
+                }
+                onClick={() => void transfer("export")}
+              >
+                <Download size={16} />
+                Export all
+              </button>
+            </div>
+            <p className="field-note">
+              Exports contain session text and reference locations, without
+              provider settings, stored API keys, or screenshots. Keep the JSON
+              file private. Imports add copies.
+            </p>
+            {transferNotice && (
+              <p role="status" className="field-note">
+                {transferNotice}
+              </p>
+            )}
+            {error && (
+              <p role="alert" className="field-note">
+                {error}
+              </p>
+            )}
             {workspace.sessions
               .slice()
               .sort((a, b) => b.updatedAt - a.updatedAt)
@@ -455,6 +548,15 @@ export default function Workspace() {
                       {new Date(s.updatedAt).toLocaleString()}
                       {s.open ? " · Open" : ""}
                     </small>
+                  </button>
+                  <button
+                    className="icon-button"
+                    aria-label={`Export ${s.title}`}
+                    title="Export session"
+                    disabled={acting || saving > 0 || !!isBusy(s.id) || !native}
+                    onClick={() => void transfer("export", s.id)}
+                  >
+                    <Download size={15} />
                   </button>
                   <button
                     className="icon-button"
