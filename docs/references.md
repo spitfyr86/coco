@@ -1,0 +1,21 @@
+# References
+
+Use **References** in the sidebar to add context alongside the code repository, screen snapshot, goal, and conversation. References can be unrelated to coding: a job description, project brief, CV, specification, or notes.
+
+- **File / Folder:** enter an absolute path or use Browse. Files are read locally without modification. Text-based PDFs, UTF-8 text/code, Markdown, JSON/CSV, and HTML are supported. Other binary formats, including DOCX, spreadsheets, audio/video, and images, require export to PDF/text or pasted text. PDFs contribute extracted text; images, layout, scanned pages, and OCR are not included.
+- **Web link:** enter a public HTTPS URL. CoCo downloads that page/document only when you add or refresh it. It does not execute JavaScript, sign in, use browser cookies, or crawl linked pages. LinkedIn and other sites may return a login page, incomplete text, or an access error. Inspect the extraction; paste the job description or attach a saved PDF when retrieval is insufficient.
+- **Pasted text:** paste material from a restricted site or an unsupported document. This also lets you provide a short curated excerpt instead of a whole file.
+
+Adding a reference extracts a snapshot; it does not call the AI. Expand **Inspect extracted text** to review exactly the redacted body, with truncation/skipping notices. Checked references are included on the next coaching request, even when reusing a screen/repository checkpoint. Refresh is manual and independent of Fresh check. Uncheck/remove excludes the snapshot from future requests, but previous conversational answers may still discuss it. A failed refresh replaces the previous body with an explicit unavailable status rather than sending stale content.
+
+Reference locations, inclusion choices, and pasted text are saved with each session. Extracted file/web bodies stay in memory while its tab stays open; closing/reopening a tab or restarting requires Refresh. New session preserves the previous tab. Reference records are separate from settings and Windows Credential Manager. Repository changes do not remove the attachments. Adding/refreshing a link contacts the destination website and exposes the normal request IP/URL; query strings are used for retrieval but stripped from source metadata sent to the coach. When using OpenAI, included extracted text and redacted source metadata are sent to OpenAI only when you ask for coaching. Ollama receives them on loopback. Reference contents are untrusted evidence, never executable instructions. See [saved sessions](sessions.md).
+
+## Limits
+
+- Eight attachments per session; each retained body is redacted and clipped to 10,000 characters (at most 80,000 characters total, plus bounded source/status metadata).
+- Files/downloads up to 8 MiB. UTF-8 text only outside PDFs. Pasted input up to 100,000 bytes before extraction clipping.
+- Folder traversal respects `.gitignore`, `.ignore`, and `.cocoignore`, filters secret/generated paths using the repository policy, and skips symbolic links/junctions. It considers at most 200 entries, depth eight, roughly 16 MiB of processed input, and a ten-second scan budget between files; excerpts are at most 4,000 characters per file. The note reports included/skipped files and limits. A single PDF extraction can exceed the folder scan budget.
+- Links use HTTPS port 443, up to three redirects, an 8 MiB response cap, and a 25-second overall network deadline. Every redirect destination is checked; private/local/reserved addresses and credential-bearing URLs are rejected. DNS is resolved and pinned for each request, without ambient proxies or authentication headers. Access errors remain visible as attachments with no readable content. HTML extraction excludes scripts/styles and explicitly hidden elements; it is not a browser rendering or a guarantee of complete/visible page content.
+- Common secret patterns are redacted, but this is not exhaustive. Inspect sensitive material before sending it to a cloud provider.
+
+Implementation: `src-tauri/src/references.rs` uses [pdf-extract](https://docs.rs/pdf-extract/latest/pdf_extract/fn.extract_text_from_mem.html), [scraper](https://docs.rs/scraper/latest/scraper/html/struct.Html.html), and the existing reqwest client stack. Local extraction does not require an additional AI key or document service.
