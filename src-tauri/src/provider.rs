@@ -103,8 +103,17 @@ pub async fn ask(
     history: &[Message],
     question: &str,
     image: Option<&str>,
+    assess: bool,
 ) -> Result<Answer, String> {
-    let instructions=INSTRUCTIONS.to_owned();
+    let instructions = if assess {
+        format!(
+            "{INSTRUCTIONS}{}{}",
+            crate::progress::INSTRUCTIONS,
+            crate::progress::PLAN_INSTRUCTIONS
+        )
+    } else {
+        INSTRUCTIONS.into()
+    };
     let provider = settings.provider.as_str();
     let local_url = settings.local_url.as_str();
     let model = settings.model.as_str();
@@ -133,6 +142,7 @@ pub async fn ask(
         input.push(json!({"role":"user", "content":content}));
         let mut payload=openai_payload(model,input,&settings.reasoning_effort);
         payload["instructions"]=json!(instructions);
+        if assess {payload["max_output_tokens"]=json!(5000);}
         client.post("https://api.openai.com/v1/responses").bearer_auth(key).json(&payload).send().await
     } else if provider == "ollama" {
         let base = valid_local_url(local_url)?;
@@ -141,7 +151,7 @@ pub async fn ask(
         let mut user = json!({"role":"user","content":user_text});
         if let Some(data) = image { user["images"] = json!([data.split_once(',').map(|(_,b)| b).unwrap_or(data)]); }
         messages.push(user);
-        client.post(format!("{base}/api/chat")).json(&json!({"model":model.trim(),"messages":messages,"stream":false,"options":{"num_predict":1600,"num_ctx":32768}})).send().await
+        client.post(format!("{base}/api/chat")).json(&json!({"model":model.trim(),"messages":messages,"stream":false,"options":{"num_predict":if assess {5000}else{1600},"num_ctx":32768}})).send().await
     } else { return Err("Unknown AI provider.".into()); }.map_err(|error| if error.is_timeout() { "The model took longer than 120 seconds. Try a smaller context or model.".into() } else { "Could not reach the AI provider. Check Settings and that the local server is running.".to_string() })?;
     let status = response.status();
     let json: Value = response
@@ -285,6 +295,7 @@ mod tests {
             &[],
             "api_key = \"test-private-value\"",
             Some("data:image/jpeg;base64,aGVsbG8="),
+            false,
         )
         .await
         .unwrap();

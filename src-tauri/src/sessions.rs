@@ -563,9 +563,13 @@ impl Manager {
         question: &str,
         answer: &crate::provider::Answer,
         checkpoint: u64,
+        attempt: Option<crate::progress::Attempt>,
     ) -> Result<Vec<ChatMessage>, String> {
         let mut store = self.store.lock().unwrap();
         let mut doc = store.docs.get(id).cloned().ok_or("Session missing.")?;
+        if let Some(attempt) = attempt {
+            crate::progress::apply(&mut doc, attempt);
+        }
         for (role, text) in [
             ("user", redact(question)),
             ("assistant", redact(&answer.text)),
@@ -597,6 +601,34 @@ impl Manager {
             .get(id)
             .map(|d| d.last_checkpoint)
             .unwrap_or(0)
+    }
+    pub fn progress_needs_plan(&self, id: &str) -> bool {
+        self.store
+            .lock()
+            .unwrap()
+            .docs
+            .get(id)
+            .is_some_and(|d| d.milestones.is_empty())
+    }
+    pub fn progress_snapshot(
+        &self,
+        id: &str,
+        checkpoint: u64,
+    ) -> Option<crate::progress::Snapshot> {
+        self.store
+            .lock()
+            .unwrap()
+            .docs
+            .get(id)
+            .and_then(|doc| crate::progress::snapshot(doc, checkpoint))
+    }
+    pub fn progress_state(&self, id: &str) -> Option<crate::progress::State> {
+        self.store
+            .lock()
+            .unwrap()
+            .docs
+            .get(id)
+            .map(crate::progress::State::from)
     }
     pub fn progress_context(&self, id: &str) -> String {
         let store = self.store.lock().unwrap();
@@ -934,7 +966,7 @@ mod tests {
             },
         };
         manager
-            .complete(&id, "api_key = \"test-private-value\"", &answer, 1)
+            .complete(&id, "api_key = \"test-private-value\"", &answer, 1, None)
             .unwrap();
         let disk = fs::read_to_string(dir.path().join(format!("{id}.json"))).unwrap();
         assert!(!disk.contains("PRIVATE_EXTRACTED_BODY") && !disk.contains("test-private-value"));
@@ -1029,5 +1061,24 @@ mod tests {
         );
         assert!(manager.view(&id).unwrap().document.goal.is_empty());
     }
+}
+
+#[tauri::command]
+pub fn undo_progress(
+    state: tauri::State<State>,
+    session_id: Option<String>,
+) -> Result<crate::progress::State, String> {
+    let id = state.sessions.id(session_id.as_deref())?;
+    let runtime = state.sessions.runtime(Some(&id))?;
+    let active = runtime.request.lock().unwrap();
+    if active.is_some() {
+        return Err("Wait for the coaching request to finish.".into());
+    }
+    let mut store = state.sessions.store.lock().unwrap();
+    let mut doc = store.docs.get(&id).cloned().ok_or("Session missing.")?;
+    crate::progress::undo(&mut doc)?;
+    let result = crate::progress::State::from(&doc);
+    store.save_doc(doc)?;
+    Ok(result)
 }
 

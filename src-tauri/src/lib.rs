@@ -353,6 +353,7 @@ async fn ask_coach(
     use_screen: bool,
     use_repository: bool,
     session_id: Option<String>,
+    assessment_checkpoint: Option<u64>,
 ) -> Result<SessionAnswer, String> {
     let id = state.sessions.id(session_id.as_deref())?;
     let runtime = state.sessions.runtime(Some(&id))?;
@@ -392,6 +393,16 @@ async fn ask_coach(
     context_text.push_str(&references::context_text(
         &runtime.references.lock().unwrap(),
     ));
+    let snapshot = if assessment_checkpoint.is_some_and(|n| n == context.number)
+        || state.sessions.progress_needs_plan(&id)
+    {
+        state.sessions.progress_snapshot(&id, context.number)
+    } else {
+        None
+    };
+    if let Some(plan) = &snapshot {
+        context_text.push_str(&progress::plan(plan));
+    }
     let key = if settings.provider == "openai" {
         key_entry().ok().and_then(|e| e.get_password().ok())
     } else {
@@ -402,14 +413,25 @@ async fn ask_coach(
     } else {
         None
     };
-    let result = tokio::select! { biased;
+    let mut result = tokio::select! { biased;
         _ = cancellation.cancelled() => Err("Request cancelled.".to_string()),
-        answer = provider::ask(&settings,key,&context_text,&history,&question,image) => answer,
+        answer = provider::ask(&settings,key,&context_text,&history,&question,image,snapshot.is_some()) => answer,
     };
     if runtime.epoch.load(Ordering::SeqCst) != epoch {
         *runtime.request.lock().unwrap() = None;
         return Err("The session changed. The previous response was discarded.".into());
     }
+    let attempt = if let (Some(snapshot), Ok(answer)) = (snapshot, &mut result) {
+        let (guidance, updates, warning) = progress::parse(&answer.text);
+        answer.text = guidance;
+        Some(progress::Attempt {
+            snapshot,
+            updates,
+            warning,
+        })
+    } else {
+        None
+    };
     if let Ok(answer) = &result {
         let mut session = runtime.session.lock().unwrap();
         session.messages.push(provider::Message {
@@ -431,7 +453,7 @@ async fn ask_coach(
     let reply = result.map(|answer| {
         let completed = state
             .sessions
-            .complete(&id, &question, &answer, context.number);
+            .complete(&id, &question, &answer, context.number, attempt);
         let save_error = completed.as_ref().err().cloned();
         let messages = completed.unwrap_or_else(|_| {
             state
@@ -444,6 +466,7 @@ async fn ask_coach(
             answer,
             messages,
             save_error,
+            progress: state.sessions.progress_state(&id),
         }
     });
     *runtime.request.lock().unwrap() = None;
@@ -457,6 +480,7 @@ struct SessionAnswer {
     answer: provider::Answer,
     messages: Vec<sessions::ChatMessage>,
     save_error: Option<String>,
+    progress: Option<progress::State>,
 }
 
 #[tauri::command]
@@ -589,6 +613,7 @@ pub fn run() {
             sessions::load_workspace,
             sessions::get_session,
             sessions::save_session_form,
+            sessions::undo_progress,
             sessions::session_action,
             sessions::import_session,
             save_settings,

@@ -56,7 +56,9 @@ import {
   compatibleEffort,
 } from "./models";
 import type { Model } from "./types";
-import type { Milestone } from "./types";
+import type { Milestone, ProgressState, ProgressCheckpoint } from "./types";
+import Milestones from "./Milestones";
+import ProgressVisual from "./ProgressVisual";
 const call = invokeNative;
 
 type Phase = "idle" | "capturing" | "thinking";
@@ -127,15 +129,29 @@ export default function App({
   const formRevision = useRef(initial.document.formRevision);
   const [settings, setSettings] = useState<Settings>(sharedSettings);
   const [goal, setGoal] = useState(initial.document.goal);
-  const [milestones] = useState<Milestone[]>(
+  const [milestones, setMilestones] = useState<Milestone[]>(
     initial.document.milestones ?? [],
   );
-  const [automaticProgress] = useState(
+  const [automaticProgress, setAutomaticProgress] = useState(
     initial.document.automaticProgress ?? true,
   );
-  const [progressEpoch] = useState(
+  const [progressEpoch, setProgressEpoch] = useState(
     initial.document.progressEpoch ?? 0,
   );
+  const [progressHistory, setProgressHistory] = useState<ProgressCheckpoint[]>(
+    initial.document.progressHistory ?? [],
+  );
+  const [progressNotice, setProgressNotice] = useState(
+    initial.document.progressNotice ?? "",
+  );
+  const applyProgress = useCallback((state: ProgressState) => {
+    setMilestones(state.milestones);
+    setAutomaticProgress(state.automatic);
+    setProgressEpoch(state.epoch);
+    setProgressHistory(state.history);
+    setProgressNotice(state.notice);
+  }, []);
+  const [showMilestones, setShowMilestones] = useState(false);
   const [contextWidth, setContextWidth] = useState(
     initial.document.contextWidth ?? 278,
   );
@@ -144,6 +160,7 @@ export default function App({
   );
   const shell = useRef<HTMLDivElement>(null);
   const dragWidth = useRef(contextWidth);
+  const completed = milestones.filter((m) => m.done).length;
   const [root, setRoot] = useState<string | null>(initial.document.root);
   const [sources, setSources] = useState<Source[]>([]);
   const [sourceId, setSourceId] = useState(initial.document.sourceId);
@@ -374,6 +391,7 @@ export default function App({
         const answer = await call<Answer>("ask_coach", {
           goal,
           question,
+          assessmentCheckpoint: refresh ? checkpoint : null,
           useScreen: includeScreen,
           useRepository: includeRepo && !!root,
         });
@@ -396,6 +414,7 @@ export default function App({
           outputTokens: current.outputTokens + answer.usage.outputTokens,
           requests: current.requests + 1,
         }));
+        if (answer.progress) applyProgress(answer.progress);
         if (answer.saveError) setError(answer.saveError);
         if (settings.speakAnswers && activeRef.current)
           void call("speak", {
@@ -418,6 +437,7 @@ export default function App({
       }
     },
     [
+      applyProgress,
       onForm,
       sessionKey,
       milestones,
@@ -923,6 +943,53 @@ export default function App({
             </button>
           </div>
         </header>
+        <div className="goal-progress">
+          <ProgressVisual items={milestones} history={progressHistory} />
+          <button
+            className="progress-open"
+            title={
+              milestones.length
+                ? "View session progress"
+                : "Load progress from this session’s goal and conversation"
+            }
+            aria-description="View checkpoints derived from the session plan"
+            disabled={isBusy || !goal.trim()}
+            onClick={() =>
+              milestones.length
+                ? setShowMilestones(true)
+                : void request(
+                    false,
+                    "Derive the checkpoints from our established goal and plan, assess current progress using our saved conversation and available evidence, and tell me the next step. If we have no established plan, propose one specific to this goal.",
+                  )
+            }
+          >
+            {milestones.length ? (
+              <>
+                <span>
+                  {completed} of {milestones.length} milestones complete
+                </span>
+                {milestones.some((m) => !m.done) && (
+                  <span className="progress-next">
+                    Next: {milestones.find((m) => !m.done)?.title}
+                  </span>
+                )}
+              </>
+            ) : (
+              <span>
+                {isBusy
+                  ? "Assessing session progress…"
+                  : goal.trim()
+                    ? "Load session progress"
+                    : "Set a goal to track progress"}
+              </span>
+            )}
+          </button>
+        </div>
+        {progressNotice && (
+          <p className="progress-notice" role="status">
+            {progressNotice}
+          </p>
+        )}
         {!native && (
           <div className="preview-banner">
             Browser preview · use the desktop app for screen, repository, and
@@ -1224,6 +1291,71 @@ export default function App({
           </span>
         </footer>
       </section>
+      {showMilestones && active && (
+        <Modal
+          title="Session progress"
+          onClose={() => setShowMilestones(false)}
+        >
+          <div className="milestones-body">
+            {goal && <p className="milestone-goal">{goal}</p>}
+            <ProgressVisual
+              items={milestones}
+              history={progressHistory}
+              expanded
+            />
+            <label className="checkbox-label">
+              <input
+                type="checkbox"
+                checked={automaticProgress}
+                disabled={isBusy}
+                onChange={(e) => setAutomaticProgress(e.target.checked)}
+              />
+              Automatic progress on Fresh check
+            </label>
+            <p className="field-note">
+              AI assessments use checkpoint evidence. Manual status changes stay
+              protected until you release them.
+            </p>
+            {progressNotice && (
+              <p role="status" className="field-note">
+                {progressNotice}
+              </p>
+            )}
+            <Milestones
+              allowAdd={false}
+              items={milestones}
+              onChange={setMilestones}
+              disabled={isBusy}
+            />
+            {progressHistory.some((p) => !p.undone) && (
+              <button
+                type="button"
+                className="button secondary"
+                disabled={isBusy}
+                onClick={async () => {
+                  try {
+                    applyProgress(await call<ProgressState>("undo_progress"));
+                  } catch (e) {
+                    setError(errorText(e));
+                  }
+                }}
+              >
+                Undo last assessment
+              </button>
+            )}
+
+            <div className="modal-footer">
+              <button
+                type="button"
+                className="button primary"
+                onClick={() => setShowMilestones(false)}
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
       {showSettings && active && (
         <SettingsDialog
           initial={settings}
