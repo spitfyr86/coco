@@ -2,6 +2,8 @@ pub mod capture;
 pub mod repository;
 pub mod models;
 pub mod provider;
+pub mod voice;
+pub mod tts;
 use std::process::Command;
 pub fn hide_console(command: &mut Command) {
     #[cfg(windows)]
@@ -18,8 +20,9 @@ pub fn hide_console(command: &mut Command) {
 #[derive(Clone,serde::Serialize,serde::Deserialize)]
 #[serde(default,rename_all="camelCase")]
 pub struct Settings {pub provider:String,pub model:String,pub reasoning_effort:String,pub local_url:String,
+pub speech: tts::Options,
 }
-impl Default for Settings {fn default()->Self {Self {provider:"ollama".into(),model:String::new(),reasoning_effort:"auto".into(),local_url:"http://127.0.0.1:11434".into(),}}}
+impl Default for Settings {fn default()->Self {Self {provider:"ollama".into(),model:String::new(),reasoning_effort:"auto".into(),local_url:"http://127.0.0.1:11434".into(),speech:tts::Options::default(),}}}
 pub fn run() {
  tauri::Builder::default().plugin(tauri_plugin_dialog::init()).run(tauri::generate_context!()).expect("Could not start CoCo");
 }
