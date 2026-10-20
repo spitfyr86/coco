@@ -11,3 +11,7 @@ artifacts/
 .local/
 *.tsbuildinfo
 .DS_Store
+
+# Only the configured Windows bundle icon belongs in version control.
+src-tauri/icons/**
+!src-tauri/icons/icon.ico
