@@ -1,0 +1,44 @@
+[
+  {
+    "id": "gpt-6.1-sol",
+    "reason": "Recommended balance of coding capability and cost, with image input.",
+    "source": "https://developers.openai.com/api/docs/models/gpt-6.1-sol",
+    "reasoningEfforts": ["low", "medium", "high", "xhigh", "max"]
+  },
+  {
+    "id": "gpt-6-sol",
+    "reason": "Compatible coding model; GPT-6.1 Sol is not available in this catalog.",
+    "source": "https://developers.openai.com/api/docs/models/gpt-6-sol",
+    "reasoningEfforts": ["none", "low", "medium", "high", "xhigh", "max"]
+  },
+  {
+    "id": "gpt-6-luna",
+    "reason": "Efficient compatible option for focused coaching and lower usage cost.",
+    "source": "https://developers.openai.com/api/docs/models/gpt-6-luna",
+    "reasoningEfforts": ["none", "low", "medium", "high", "xhigh", "max"]
+  },
+  {
+    "id": "gpt-6-astra",
+    "reason": "High-capability compatible option; higher usage cost than Sol.",
+    "source": "https://developers.openai.com/api/docs/models/gpt-6-astra",
+    "reasoningEfforts": ["low", "medium", "high", "xhigh", "max"]
+  },
+  {
+    "id": "gpt-5-mini",
+    "reason": "Compatible smaller model when preferred current models are unavailable.",
+    "source": "https://developers.openai.com/api/docs/models/gpt-5-mini",
+    "reasoningEfforts": ["minimal", "low", "medium", "high"]
+  },
+  {
+    "id": "gpt-4.1",
+    "reason": "Compatible older coding model; preferred current models are unavailable.",
+    "source": "https://developers.openai.com/api/docs/models/gpt-4.1",
+    "reasoningEfforts": []
+  },
+  {
+    "id": "gpt-4o",
+    "reason": "Compatible older vision model; preferred coding models are unavailable.",
+    "source": "https://developers.openai.com/api/docs/models/gpt-4o",
+    "reasoningEfforts": []
+  }
+]
